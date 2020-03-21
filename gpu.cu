@@ -21,10 +21,12 @@ double *d_pos;
 double *d_vel;
 double *d_acc;
 double *sorted_pos;
+double *empty_list;
 double *sorted_vel;
 double *sorted_acc;
 int *bin_index;
 int *particle_index;
+int *original_p_index;
 int *bin_start;
 int *bin_end;
 int num_bins;
@@ -37,29 +39,32 @@ static __inline__ __device__ double fetch_double(texture<int2, 1> t, int i)
 
 __global__ void copyparts_2( particle_t* parts, int num_parts, double *pos, double *vel, double* acc)
 {
-	int i = threadIdx.x + blockIdx.x * blockDim.x;
-	if(i >= num_parts) return;
-	particle_t* p = &parts[i];
-	pos[2*i] = p -> x;
-	pos[2*i+1] = p -> y;
-	vel[2*i] = p -> vx;
-	vel[2*i+1] = p -> vy;
-	acc[2*i] = p -> ax;
-	acc[2*i+1] = p -> ay;
+	int tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid >= num_parts) return;
+
+	particle_t* p = &parts[tid];
+
+	pos[2*tid] = p -> x;
+	pos[2*tid+1] = p -> y;
+	vel[2*tid] = p -> vx;
+	vel[2*tid+1] = p -> vy;
+	acc[2*tid] = p -> ax;
+	acc[2*tid+1] = p -> ay;
     
 }
 __global__ void copyparts_back( particle_t* parts, int num_parts, double *pos, double *vel, double* acc)
 {
-	int i = threadIdx.x + blockIdx.x * blockDim.x;
-	if(i >= num_parts) return;
-	particle_t* p = &parts[i];
+	int tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid >= num_parts) return;
 
-	p -> x = pos[2*i];
-	p -> y = pos[2*i+1];
-	p -> vx = vel[2*i];
-	p -> vy = vel[2*i+1];
-	p -> ax = acc[2*i];
-	p -> ay = acc[2*i+1];
+	particle_t* p = &parts[tid];
+
+	p -> x = pos[2*tid];
+	p -> y = pos[2*tid+1];
+	p -> vx = vel[2*tid];
+	p -> vy = vel[2*tid+1];
+	p -> ax = acc[2*tid];
+	p -> ay = acc[2*tid+1];
 }
 void sort_particles(int *bin_index, int *particle_index, int num_parts)
 {
@@ -68,13 +73,14 @@ void sort_particles(int *bin_index, int *particle_index, int num_parts)
 			thrust::device_ptr<int>(particle_index));
 }
 
-// calculate particle's bin number
 static __inline__ __device__ int binNum(double &d_x, double &d_y, int bpr) 
 {
 	return ( floor(d_x/cutoff) + bpr*floor(d_y/cutoff) );
 }
 
-__global__ void reorder_data_calc_bin(int *bin_start, int *bin_end, double *sorted_pos, double *sorted_vel, double *sorted_acc, int *bin_index, int *particle_index, double *d_pos, double *d_vel, double *d_acc, int num_parts, int num_bins)
+__global__ void reorder_data_calc_bin(int *bin_start, int *bin_end, double *sorted_pos, 
+	double *sorted_vel, double *sorted_acc, int *bin_index, int *particle_index, int *original_p_index, double *d_pos, 
+	double *d_vel, double *d_acc, int num_parts, int num_bins)
 {
 	extern __shared__ int sharedHash[];    // blockSize + 1 elements
 	int index = threadIdx.x + blockIdx.x * blockDim.x;
@@ -118,6 +124,23 @@ __global__ void reorder_data_calc_bin(int *bin_start, int *bin_end, double *sort
 		sorted_vel[2*index+1] = d_vel[2*sortedIndex+1];
 		sorted_acc[2*index]   = d_acc[2*sortedIndex];
 		sorted_acc[2*index+1] = d_acc[2*sortedIndex+1];
+		original_p_index[sortedIndex] = index;
+
+	}
+}
+__global__ void reorder_data_back(double *sorted_back_pos, double *sorted_back_vel, double *sorted_back_acc, 
+	int *original_p_index, double *sorted_pos, double *sorted_vel, double *sorted_acc, int num_parts)
+{
+	int index = threadIdx.x + blockIdx.x * blockDim.x;
+	if (index < num_parts) {
+		// Now use the sorted index to reorder the pos and vel data
+		int sortedIndex = original_p_index[index];
+		sorted_back_pos[2*index]     = sorted_pos[2*sortedIndex];
+		sorted_back_pos[2*index+1] = sorted_pos[2*sortedIndex+1];
+		sorted_back_vel[2*index]       = sorted_vel[2*sortedIndex];
+		sorted_back_vel[2*index+1]   = sorted_vel[2*sortedIndex+1];
+		sorted_back_acc[2*index]   = sorted_acc[2*sortedIndex];
+		sorted_back_acc[2*index+1] = sorted_acc[2*sortedIndex+1];
 	}
 }
 
@@ -132,14 +155,14 @@ __global__ void calculate_bin_index(int *bin_index, int *particle_index, double 
 	particle_index[index] = index;
 }
 
-static __inline__ __device__ void apply_force_gpu(double &particle_x, double &particle_y, double &particle_ax, double &particle_ay, double &neighbor_x, double &neighbor_y)
+__device__ void apply_force_gpu(double &particle_x, double &particle_y, double &particle_ax, double &particle_ay, double &neighbor_x, double &neighbor_y)
 {
 	double dx = neighbor_x - particle_x;
 	double dy = neighbor_y - particle_y;
 	double r2 = dx * dx + dy * dy;
 	if( r2 > cutoff*cutoff )
 		return;
-	//r2 = fmax( r2, min_r*min_r );
+
 	r2 = (r2 > min_r*min_r) ? r2 : min_r*min_r;
 	double r = sqrt( r2 );
 
@@ -155,7 +178,8 @@ __global__ void compute_forces_gpu(double *pos, double *acc, int num_parts, int 
 {
 	// Get thread (particle) ID
 	int tid = threadIdx.x + blockIdx.x * blockDim.x;
-	if(tid >= num_parts) return;
+	if (tid >= num_parts) 
+		return;
 
 	double pos_1x = fetch_double(old_pos_tex, 2*tid);
 	double pos_1y = fetch_double(old_pos_tex, 2*tid+1);
@@ -163,9 +187,9 @@ __global__ void compute_forces_gpu(double *pos, double *acc, int num_parts, int 
 	// find current particle's in, handle boundaries
 	int cbin = binNum( pos_1x, pos_1y, bpr );
 	int lowi = -1, highi = 1, lowj = -1, highj = 1;
-	if (cbin < bpr)
+	if (cbin < bpr) // in the first row
 		lowj = 0;
-	if (cbin % bpr == 0)
+	if (cbin % bpr == 0) // in the first column
 		lowi = 0;
 	if (cbin % bpr == (bpr-1))
 		highi = 0;
@@ -199,12 +223,9 @@ __global__ void move_gpu (double *pos, double *vel, double *acc, int num_parts, 
 
 	// Get thread (particle) ID
 	int tid = threadIdx.x + blockIdx.x * blockDim.x;
-	if(tid >= num_parts) return;
+	if(tid >= num_parts) 
+		return;
 
-	//
-	//  slightly simplified Velocity Verlet integration
-	//  conserves energy better than explicit Euler method
-	//
 	double acc_x = fetch_double(old_acc_tex, 2*tid);
 	double acc_y = fetch_double(old_acc_tex, 2*tid+1);
 	double vel_x = fetch_double(old_vel_tex, 2*tid);
@@ -221,32 +242,30 @@ __global__ void move_gpu (double *pos, double *vel, double *acc, int num_parts, 
 	//
 	while( pos_x < 0 || pos_x > size )
 	{
-		pos_x = pos_x < 0 ? -(pos_x) : 2*size-pos_x;
-		vel_x = -(vel_x);
+		pos_x = pos_x < 0 ? - (pos_x) : 2 * size - pos_x;
+		vel_x = - (vel_x);
 	}
 	while( pos_y < 0 || pos_y > size )
 	{
-		pos_y = pos_y < 0 ? -(pos_y) : 2*size-pos_y;
-		vel_y = -(vel_y);
+		pos_y = pos_y < 0 ? - (pos_y) : 2 * size - pos_y;
+		vel_y = - (vel_y);
 	}
 
 	vel[2*tid] = vel_x;
 	vel[2*tid+1] = vel_y;
 	pos[2*tid] = pos_x;
     pos[2*tid+1] = pos_y;
-    
+	acc[2*tid] = 0;
+	acc[2*tid+1] = 0;
 }
 
 
-void init_simulation(particle_t* parts, int num_parts, double size) {
+void init_simulation(particle_t* parts, int num_parts, double size) 
+{
     // You can use this space to initialize data objects that you may need
     // This function will be called once before the algorithm begins
     // parts live in GPU memory
     // Do not do any particle simulation here
-
-	// pos = (double *) malloc( 2*num_parts * sizeof(double) );
-	// vel = (double *) malloc( 2*num_parts * sizeof(double) );
-	// acc = (double *) malloc( 2*num_parts * sizeof(double) );
 
 	// GPU particle data structure
 	cudaMalloc((void **) &d_pos, 2*num_parts * sizeof(double));
@@ -256,47 +275,47 @@ void init_simulation(particle_t* parts, int num_parts, double size) {
 	cudaMalloc((void **) &sorted_pos, 2*num_parts * sizeof(double));
 	cudaMalloc((void **) &sorted_vel, 2*num_parts * sizeof(double));
 	cudaMalloc((void **) &sorted_acc, 2*num_parts * sizeof(double));
-
+	cudaMalloc((void **) &empty_list, 2*num_parts * sizeof(double));
+	
 	cudaMalloc((void **) &bin_index, num_parts * sizeof(int));
 	cudaMemset(bin_index, 0x0, num_parts * sizeof(int));
 	cudaMalloc((void **) &particle_index, num_parts * sizeof(int));
 	cudaMemset(particle_index, 0x0, num_parts * sizeof(int));
 
-	binPerRow = int(size / (1.5 * cutoff));
+	cudaMalloc((void **) &original_p_index, num_parts * sizeof(int));
+	cudaMemset(original_p_index, 0x0, num_parts * sizeof(int));
+
+	binPerRow = int(size / (1.3 * cutoff));
 	num_bins = binPerRow * binPerRow;
 
 	cudaMalloc((void **) &bin_start, num_bins * sizeof(int));
 	cudaMalloc((void **) &bin_end, num_bins * sizeof(int));
 	cudaMemset(bin_start, 0x0, num_bins * sizeof(int));
-    cudaMemset(bin_end, 0x0, num_bins * sizeof(int));
-    
+	cudaMemset(bin_end, 0x0, num_bins * sizeof(int));
 	cudaDeviceSynchronize();
-    blks = (num_parts + NUM_THREADS - 1) / NUM_THREADS;
-
-	// cudaMemcpy(d_pos, pos, 2*num_parts * sizeof(double), cudaMemcpyHostToDevice);
-	// cudaMemcpy(d_vel, vel, 2*num_parts * sizeof(double), cudaMemcpyHostToDevice);
-	// cudaMemcpy(d_acc, acc, 2*num_parts * sizeof(double), cudaMemcpyHostToDevice);
-	copyparts_2 <<< blks, NUM_THREADS >>> (parts, num_parts, d_pos, d_vel, d_acc);
-
+	blks = (num_parts + NUM_THREADS - 1) / NUM_THREADS;
 }
 
-void simulate_one_step(particle_t* parts, int num_parts, double size) {
-    // parts live in GPU memory
-    // Rewrite this function
-    // Compute forces
+void simulate_one_step(particle_t* parts, int num_parts, double size) 
+{
+	copyparts_2 <<< blks, NUM_THREADS >>> (parts, num_parts, d_pos, d_vel, d_acc);
+
     cudaBindTexture(0, old_pos_tex, d_pos, 2*num_parts * sizeof(int2));
     calculate_bin_index <<< blks, NUM_THREADS >>> (bin_index, particle_index, d_pos, num_parts, binPerRow);
     cudaUnbindTexture(old_pos_tex);
 
     cudaBindTexture(0, bin_index_tex, bin_index, num_parts * sizeof(int));
     cudaBindTexture(0, particle_index_tex, particle_index, num_parts * sizeof(int));
-    sort_particles(bin_index, particle_index, num_parts);
+	sort_particles(bin_index, particle_index, num_parts);
     cudaUnbindTexture(bin_index_tex);
     cudaUnbindTexture(particle_index_tex);
-
+	// sorted_pos = empty_list;
+    // sorted_vel = empty_list;
+	// sorted_acc = empty_list;
+	cudaDeviceSynchronize();
     cudaMemset(bin_start, 0xffffffff, num_bins * sizeof(int));
     int smemSize = sizeof(int)*(NUM_THREADS+1);
-    reorder_data_calc_bin <<< blks, NUM_THREADS, smemSize >>> (bin_start, bin_end, sorted_pos, sorted_vel, sorted_acc, bin_index, particle_index, d_pos, d_vel, d_acc, num_parts, num_bins);
+    reorder_data_calc_bin <<< blks, NUM_THREADS, smemSize >>> (bin_start, bin_end, sorted_pos, sorted_vel, sorted_acc, bin_index, particle_index, original_p_index, d_pos, d_vel, d_acc, num_parts, num_bins);
 
     cudaBindTexture(0, old_pos_tex, sorted_pos, 2*num_parts * sizeof(int2));
     cudaBindTexture(0, bin_start_tex, bin_start, num_bins * sizeof(int));
@@ -309,34 +328,34 @@ void simulate_one_step(particle_t* parts, int num_parts, double size) {
     cudaUnbindTexture(bin_end_tex);
 
 
-    // cudaDeviceSynchronize(); or add hasMoved to parts
+    cudaDeviceSynchronize(); //or add hasMoved to parts
 
     // Move particles
     cudaBindTexture(0, old_pos_tex, sorted_pos, 2*num_parts * sizeof(int2));
     cudaBindTexture(0, old_vel_tex, sorted_vel, 2*num_parts * sizeof(int2));
     cudaBindTexture(0, old_acc_tex, sorted_acc, 2*num_parts * sizeof(int2));
-    move_gpu <<< blks, NUM_THREADS >>> (sorted_pos, sorted_vel, sorted_acc, num_parts, size);
-    copyparts_back<<< blks, NUM_THREADS >>> (parts, num_parts, d_pos, d_vel, d_acc);
-	cudaDeviceSynchronize();
-
+	move_gpu <<< blks, NUM_THREADS >>> (sorted_pos, sorted_vel, sorted_acc, num_parts, size);
     cudaUnbindTexture(old_pos_tex);
     cudaUnbindTexture(old_vel_tex);
     cudaUnbindTexture(old_acc_tex);
-    // move_gpu<<<blks, NUM_THREADS>>>(parts, num_parts, size);
-    
-    // Swap particles between d_particles and sorted_particles
-    double *temp_pos = sorted_pos;
-    double *temp_vel = sorted_vel;
-    double *temp_acc = sorted_acc;
-    sorted_pos = d_pos;
-    sorted_vel = d_vel;
-    sorted_acc = d_acc;
-    d_pos = temp_pos;
-    d_vel = temp_vel;
-    d_acc = temp_acc;
 
-    // cudaMemcpy(pos, d_pos, 2*num_parts * sizeof(double), cudaMemcpyDeviceToHost);
-    // cudaMemcpy(vel, d_vel, 2*num_parts * sizeof(double), cudaMemcpyDeviceToHost);
-    // cudaMemcpy(acc, d_acc, 2*num_parts * sizeof(double), cudaMemcpyDeviceToHost);
+    // Swap particles between d_particles and sorted_particles
+    // double *temp_pos = sorted_pos;
+    // double *temp_vel = sorted_vel;
+    // double *temp_acc = sorted_acc;
+	// sorted_pos = d_pos;
+    // sorted_vel = d_vel;
+    // sorted_acc = d_acc;
+    // d_pos = temp_pos;
+    // d_vel = temp_vel;
+	// d_acc = temp_acc;
+	reorder_data_back<<< blks, NUM_THREADS >>> (d_pos, d_vel, d_acc,  original_p_index, sorted_pos, sorted_vel, sorted_acc, num_parts);
+
+	// cudaDeviceSynchronize();
+	copyparts_back<<< blks, NUM_THREADS >>> (parts, num_parts, d_pos, d_vel, d_acc);
+
+	// sorted_pos = empty_list;
+    // sorted_vel = empty_list;
+	// sorted_acc = empty_list;
 
 }

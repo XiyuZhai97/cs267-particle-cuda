@@ -73,9 +73,16 @@ void sort_particles(int *bin_index, int *particle_index, int num_parts)
 			thrust::device_ptr<int>(particle_index));
 }
 
-static __inline__ __device__ int binNum(double &d_x, double &d_y, int bpr) 
+static __inline__ __device__ int binNum(double &d_x, double &d_y, int binPerRow, double binSize) 
 {
-	return ( floor(d_x/cutoff) + bpr*floor(d_y/cutoff) );
+	int rowid = int(d_y / binSize);
+	int colid = int(d_x / binSize);
+
+	if (rowid >= binPerRow)
+		rowid = binPerRow - 1;
+	if (colid >= binPerRow)
+		colid = binPerRow - 1;
+	return rowid * binPerRow + colid;
 }
 
 __global__ void reorder_data_calc_bin(int *bin_start, int *bin_end, double *sorted_pos, 
@@ -144,13 +151,13 @@ __global__ void reorder_data_back(double *sorted_back_pos, double *sorted_back_v
 	}
 }
 
-__global__ void calculate_bin_index(int *bin_index, int *particle_index, double *d_pos, int num_parts, int bpr)
+__global__ void calculate_bin_index(int *bin_index, int *particle_index, double *d_pos, int num_parts, int bpr, double binSize)
 {
 	int index = threadIdx.x + blockIdx.x * blockDim.x;
 	if(index >= num_parts) return;
 	double pos_x = fetch_double(old_pos_tex, 2*index);
 	double pos_y = fetch_double(old_pos_tex, 2*index+1);
-	int cbin = binNum( pos_x,pos_y,bpr );
+	int cbin = binNum( pos_x,pos_y,bpr, binSize);
 	bin_index[index] = cbin;
 	particle_index[index] = index;
 }
@@ -160,10 +167,10 @@ __device__ void apply_force_gpu(double &particle_x, double &particle_y, double &
 	double dx = neighbor_x - particle_x;
 	double dy = neighbor_y - particle_y;
 	double r2 = dx * dx + dy * dy;
-	if( r2 > cutoff*cutoff )
+	if( r2 > cutoff * cutoff )
 		return;
 
-	r2 = (r2 > min_r*min_r) ? r2 : min_r*min_r;
+	r2 = (r2 > min_r * min_r) ? r2 : min_r*min_r;
 	double r = sqrt( r2 );
 
 	//
@@ -174,7 +181,7 @@ __device__ void apply_force_gpu(double &particle_x, double &particle_y, double &
 	particle_ay += coef * dy;
 }
 
-__global__ void compute_forces_gpu(double *pos, double *acc, int num_parts, int bpr, int *bin_start, int *bin_end)
+__global__ void compute_forces_gpu(double *pos, double *acc, int num_parts, int bpr, int *bin_start, int *bin_end, double binSize)
 {
 	// Get thread (particle) ID
 	int tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -185,7 +192,9 @@ __global__ void compute_forces_gpu(double *pos, double *acc, int num_parts, int 
 	double pos_1y = fetch_double(old_pos_tex, 2*tid+1);
 
 	// find current particle's in, handle boundaries
-	int cbin = binNum( pos_1x, pos_1y, bpr );
+	int cbin = binNum( pos_1x, pos_1y, bpr, binSize);
+	// printf("Thread %d, cbin = %d, bpr = %d\n", tid, cbin, bpr);
+
 	int lowi = -1, highi = 1, lowj = -1, highj = 1;
 	if (cbin < bpr) // in the first row
 		lowj = 0;
@@ -199,7 +208,6 @@ __global__ void compute_forces_gpu(double *pos, double *acc, int num_parts, int 
 	double acc_x;
 	double acc_y;
 	acc_x = acc_y = 0;
-
 	for (int i = lowi; i <= highi; i++)
 		for (int j = lowj; j <= highj; j++)
 		{
@@ -210,12 +218,16 @@ __global__ void compute_forces_gpu(double *pos, double *acc, int num_parts, int 
 				for (int k = bin_st; k < bin_et; k++ ) {
 					double pos_2x = fetch_double(old_pos_tex, 2*k);
 					double pos_2y = fetch_double(old_pos_tex, 2*k+1);
+					// printf("Thread %d, neighbor_bin = %d\n", tid, k);
+
 					apply_force_gpu( pos_1x, pos_1y, acc_x, acc_y, pos_2x, pos_2y );
 				}
 			}
 		}
 	acc[2*tid] = acc_x;
 	acc[2*tid+1] = acc_y;
+	// printf("Thread %d, acc_x = %f, acc_y = %f\n", tid, acc_x, acc_y);
+
 }
 
 __global__ void move_gpu (double *pos, double *vel, double *acc, int num_parts, double size)
@@ -301,7 +313,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size)
 	copyparts_2 <<< blks, NUM_THREADS >>> (parts, num_parts, d_pos, d_vel, d_acc);
 
     cudaBindTexture(0, old_pos_tex, d_pos, 2*num_parts * sizeof(int2));
-    calculate_bin_index <<< blks, NUM_THREADS >>> (bin_index, particle_index, d_pos, num_parts, binPerRow);
+    calculate_bin_index <<< blks, NUM_THREADS >>> (bin_index, particle_index, d_pos, num_parts, binPerRow, binSize);
     cudaUnbindTexture(old_pos_tex);
 
     cudaBindTexture(0, bin_index_tex, bin_index, num_parts * sizeof(int));
@@ -321,7 +333,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size)
     cudaBindTexture(0, bin_start_tex, bin_start, num_bins * sizeof(int));
     cudaBindTexture(0, bin_end_tex, bin_end, num_bins * sizeof(int));
 
-    compute_forces_gpu <<< blks, NUM_THREADS >>> (sorted_pos, sorted_acc, num_parts, binPerRow, bin_start, bin_end);
+    compute_forces_gpu <<< blks, NUM_THREADS >>> (sorted_pos, sorted_acc, num_parts, binPerRow, bin_start, bin_end, binSize);
 
     cudaUnbindTexture(old_pos_tex);
     cudaUnbindTexture(bin_start_tex);

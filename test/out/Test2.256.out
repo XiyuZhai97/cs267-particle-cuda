@@ -1,6 +1,6 @@
-Simulation Time = 0.524704 seconds for 1000 particles.
-Simulation Time = 0.713585 seconds for 2000 particles.
-Simulation Time = 1.37876 seconds for 4000 particles.
-Simulation Time = 3.51105 seconds for 10000 particles.
-Simulation Time = 8.44551 seconds for 20000 particles.
-Simulation Time = 37.4257 seconds for 40000 particles.
+Simulation Time = 0.30576 seconds for 1000 particles.
+Simulation Time = 0.924747 seconds for 2000 particles.
+Simulation Time = 1.32771 seconds for 4000 particles.
+Simulation Time = 2.14382 seconds for 8000 particles.
+Simulation Time = 4.30218 seconds for 16000 particles.
+Simulation Time = 10.2628 seconds for 32000 particles.

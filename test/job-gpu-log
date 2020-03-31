@@ -1,0 +1,13 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -p GPU-shared
+#SBATCH -t 00:30:00
+#SBATCH --gres=gpu:p100:1
+
+../build/gpu -s 10 -n 1000 >>  ./out/Test2.256.out
+../build/gpu -s 10 -n 2000 >>  ./out/Test2.256.out
+../build/gpu -s 10 -n 4000 >>  ./out/Test2.256.out
+../build/gpu -s 10 -n 8000 >>  ./out/Test2.256.out
+../build/gpu -s 10 -n 16000 >>  ./out/Test2.256.out
+../build/gpu -s 10 -n 32000 >>  ./out/Test2.256.out

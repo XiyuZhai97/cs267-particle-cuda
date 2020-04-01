@@ -1,5 +1,5 @@
 #!/bin/bash
-rm ./out/Test2.256.out
+rm ./out/Test3.256.out
 sbatch job-gpu-log
 # sbatch job-gpu-naive-log
 # for seed in 10

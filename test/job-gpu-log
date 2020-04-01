@@ -5,9 +5,12 @@
 #SBATCH -t 00:30:00
 #SBATCH --gres=gpu:p100:1
 
-../build/gpu -s 10 -n 1000 >>  ./out/Test2.256.out
-../build/gpu -s 10 -n 2000 >>  ./out/Test2.256.out
-../build/gpu -s 10 -n 4000 >>  ./out/Test2.256.out
-../build/gpu -s 10 -n 8000 >>  ./out/Test2.256.out
-../build/gpu -s 10 -n 16000 >>  ./out/Test2.256.out
-../build/gpu -s 10 -n 32000 >>  ./out/Test2.256.out
+../build/gpu -s 10 -n 10000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 20000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 40000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 80000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 160000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 320000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 640000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 1280000 >>  ./out/Test3.256.out
+../build/gpu -s 10 -n 2560000 >>  ./out/Test3.256.out

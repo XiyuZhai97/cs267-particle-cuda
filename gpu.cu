@@ -304,12 +304,11 @@ void init_simulation(particle_t* parts, int num_parts, double size)
 	cudaMemset(bin_end, 0x0, num_bins * sizeof(int));
 	cudaDeviceSynchronize();
 	blks = (num_parts + NUM_THREADS - 1) / NUM_THREADS;
+	copyparts_2 <<< blks, NUM_THREADS >>> (parts, num_parts, d_pos, d_vel, d_acc);
 }
 
 void simulate_one_step(particle_t* parts, int num_parts, double size) 
 {
-	copyparts_2 <<< blks, NUM_THREADS >>> (parts, num_parts, d_pos, d_vel, d_acc);
-
     cudaBindTexture(0, old_pos_tex, d_pos, 2*num_parts * sizeof(int2));
     calculate_bin_index <<< blks, NUM_THREADS >>> (bin_index, particle_index, d_pos, num_parts, binPerRow, binSize);
     cudaUnbindTexture(old_pos_tex);

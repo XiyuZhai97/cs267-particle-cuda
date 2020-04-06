@@ -6,6 +6,13 @@
 // Put any static global variables here that you will use throughout the simulation.
 int blks;
 
+int binPerRow;
+int binCount;
+double binSize;
+
+int* heads;
+int* Llist;
+
 __device__ void apply_force_gpu(particle_t& particle, particle_t& neighbor) {
     double dx = neighbor.x - particle.x;
     double dy = neighbor.y - particle.y;
@@ -24,15 +31,63 @@ __device__ void apply_force_gpu(particle_t& particle, particle_t& neighbor) {
     particle.ay += coef * dy;
 }
 
-__global__ void compute_forces_gpu(particle_t* particles, int num_parts) {
+
+__device__ int inline calcBin(particle_t& p, int binPerRow, double binSize) {
+    int rowid = int(p.y / binSize);
+    int colid = int(p.x / binSize);
+    if (rowid == binPerRow) {
+        rowid = binPerRow - 1;
+    }
+    if (colid == binPerRow) {
+        colid = binPerRow - 1;
+    }
+    return rowid * binPerRow + colid;
+}
+
+
+__global__ void rebin(particle_t* particles, int num_parts, int binPerRow, int binCount, double binSize, int* heads, int* Llist) {
+    // Get thread (particle) ID
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    if (tid < binCount) {
+        heads[tid] = -1;
+    }
+    if (tid >= num_parts)
+        return;
+    int thisBin = calcBin(particles[tid], binPerRow, binSize);
+    Llist[tid] = atomicExch(&heads[thisBin], tid);
+}
+
+__device__ void inline applyForceBetweenBlock(particle_t* parts, int pid, int neighborBin, int* heads, int* Llist) {
+    int ptr = heads[neighborBin];
+    for (; ptr != -1; ptr = Llist[ptr]) {
+        apply_force_gpu(parts[pid], parts[ptr]);
+    }
+}
+
+__global__ void compute_forces_gpu(particle_t* particles, int num_parts, int binPerRow, int binCount, double binSize, int* heads, int* Llist) {
     // Get thread (particle) ID
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     if (tid >= num_parts)
         return;
 
     particles[tid].ax = particles[tid].ay = 0;
-    for (int j = 0; j < num_parts; j++)
-        apply_force_gpu(particles[tid], particles[j]);
+    int thisBin = calcBin(particles[tid], binPerRow, binSize);
+    int lowi = -1, highi = 1, lowj = -1, highj = 1;
+	if (thisBin < binPerRow) // in the first row
+		lowj = 0;
+	if (thisBin % binPerRow == 0) // in the first column
+		lowi = 0;
+	if (thisBin % binPerRow == (binPerRow-1))
+		highi = 0;
+	if (thisBin >= binPerRow*(binPerRow-1))
+        highj = 0;
+        
+    for (int i = lowi; i <= highi; i++){
+        for (int j = lowj; j <= highj; j++){
+            int neighborBin = thisBin + i + binPerRow*j;
+            applyForceBetweenBlock(particles, tid, neighborBin, heads, Llist);
+        }
+    }
 }
 
 __global__ void move_gpu(particle_t* particles, int num_parts, double size) {
@@ -72,15 +127,23 @@ void init_simulation(particle_t* parts, int num_parts, double size) {
     // Do not do any particle simulation here
 
     blks = (num_parts + NUM_THREADS - 1) / NUM_THREADS;
+    binPerRow = size / cutoff;
+    binCount = binPerRow * binPerRow;
+    binSize = size / binPerRow;
+    cudaMalloc((void**)&heads, binCount * sizeof(int));
+    cudaMalloc((void**)&Llist, num_parts * sizeof(int));
 }
 
 void simulate_one_step(particle_t* parts, int num_parts, double size) {
     // parts live in GPU memory
     // Rewrite this function
+    int tmp_blks = (binCount + NUM_THREADS - 1) / NUM_THREADS;
+    rebin<<<tmp_blks, NUM_THREADS>>>(parts, num_parts, binPerRow, binCount, binSize, heads, Llist);
 
     // Compute forces
-    compute_forces_gpu<<<blks, NUM_THREADS>>>(parts, num_parts);
+    compute_forces_gpu<<<blks, NUM_THREADS>>>(parts, num_parts, binPerRow, binCount, binSize, heads, Llist);
 
     // Move particles
     move_gpu<<<blks, NUM_THREADS>>>(parts, num_parts, size);
+
 }

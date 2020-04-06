@@ -5,4 +5,5 @@
 #SBATCH -t 00:30:00
 #SBATCH --gres=gpu:p100:1
 
-./gpu
+./gpu -s 10 -n 1000 -o gpu_1000.out
+./gpu_naive -s 10 -n 1000 -o gpu_naive_1000.out
